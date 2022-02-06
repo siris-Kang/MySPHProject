@@ -1,0 +1,5 @@
+﻿  Compiling CUDA source file kernel.cu...
+  
+  C:\REBECCA\CudaLibrary>"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.5\bin\nvcc.exe" -gencode=arch=compute_52,code=\"sm_52,compute_52\" --use-local-env -ccbin "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.29.30133\bin\HostX86\x64" -x cu   -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.5\include" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.5\include"     --keep-dir x64\Release  -maxrregcount=0  --machine 64 --compile -cudart static    -DWIN32 -DWIN64 -DNDEBUG -D_CONSOLE -D_MBCS -Xcompiler "/EHsc /W3 /nologo /O2 /FdC:\REBECCA\x64\Release\CudaLibrary.pdb /FS   /MD " -o x64\Release\kernel.cu.obj "C:\REBECCA\CudaLibrary\kernel.cu" 
+  kernel.cu
+  CudaLibrary.vcxproj -> C:\REBECCA\x64\Release\CudaLibrary.lib
