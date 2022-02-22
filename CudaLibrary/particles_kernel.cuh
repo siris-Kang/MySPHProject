@@ -48,6 +48,23 @@ struct SimParams
     float viscosityCoefficient;
     float restitutionCoefficient;
     float surfaceTension;
+
+    //Marching Cube
+    float CflScale;
+
+    float Poly6;
+    float Poly6Gradient;
+    float Poly6Laplacian;
+    float SpikyGradient;
+    float ViscosityLaplacian;
+
+    float DeltaTime;
+
+    float XScaleFactor;
+    float YScaleFactor;
+    float ZScaleFactor;
+
+    int MarchingCubesNeighborSearchDepth;
 };
 
 #endif

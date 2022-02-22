@@ -17,8 +17,9 @@ AMaxim_de_Winter::AMaxim_de_Winter()
 	particleMeshRadius = 50.0f;
 	particleRenderRadius = 10.0f;
 	//particleRadius = 1.0f / 64.0f;
-    widthScaling = 1500.f;
-    radiusScaling = 0.7f;
+    widthScaling = 500.f;
+    widthYScaling = 100.f;
+    radiusScaling = 0.4f;
 	
 	//Add particle instanced mesh component
 	ParticleInstancedMeshComponent = CreateDefaultSubobject<UInstancedStaticMeshComponent>("ParticleInstancedMeshComponent");
@@ -43,6 +44,8 @@ AMaxim_de_Winter::AMaxim_de_Winter()
 
     m_gridSortBits = 18;    // increase this for larger grids
 
+    timeStep = 0.03f;
+
     // set simulation parameters
     m_params.gridSize = m_gridSize;
     m_params.numCells = m_numGridCells;
@@ -65,14 +68,14 @@ AMaxim_de_Winter::AMaxim_de_Winter()
     m_params.globalDamping = 1.0f;
 
     m_params.fluidParticleMass = 0.02f;
-    m_params.boundaryParticleMass = 0.03f;
+    m_params.boundaryParticleMass = 0.02f;
     m_params.waterRestDensity = 998.29f;
     m_params.particleRadius = 0.01f;//1.0f / 64.0f;
     m_params.viscosityCoefficient = 3.5f;//0.001003f; //3.5f; //1.003 × 10−3
     m_params.gasStiffnessConstant = 3.f;  // 135409.f; // k = nRT
     m_params.restitutionCoefficient = 0.001f;
     m_params.surfaceTension = 0.0728f;
-    m_params.smoothingLength = 0.0457f;//2.0f * m_params.particleRadius;//1.3 * pow((m_params.particleMass / m_params.waterRestDensity), (1 / 3)); //0.0457f;
+    m_params.smoothingLength = 0.04f;//2.0f * m_params.particleRadius;//1.3 * pow((m_params.particleMass / m_params.waterRestDensity), (1 / 3)); //0.0457f;
 
     addedBoundaryParticles = 0;
     addedFluidPraticles = 0;
@@ -94,7 +97,8 @@ void AMaxim_de_Winter::BeginPlay()
         Destroy();
     }
     initialize(m_numParticles);
-    reset();
+    resetStart();
+    //reset();
 	
     /*ParticleInstancedMeshComponent->PreAllocateInstancesMemory(5);
 	for (uint32 Index = 0; Index < 5; ++Index)
@@ -110,8 +114,25 @@ void AMaxim_de_Winter::BeginPlay()
         int32 Result = BoundaryParticleInstancedMeshComponent->AddInstance(FTransform(FRotator::ZeroRotator, Location, FVector(particleRenderRadius / particleMeshRadius)));
     }*/
 
-    _addBoudaryCube();
-    _addFluidCube();
+    //_addBoudaryCube();
+    //_addFluidCube();
+    _addBoudaryCube2();
+    //float pos1[4], width1[4], vel1[4];
+    //float space = 1.0f;
+    ////1
+    //pos1[0] = -0.7f;
+    //pos1[1] = -0.7f;
+    //pos1[2] = -0.5f;
+    //pos1[3] = 0.0f;
+    //width1[0] = 0.4f;
+    //width1[1] = 0.05f;
+    //width1[2] = 0.3f;
+    //width1[3] = 0.0f;
+    //vel1[0] = 0.0f;
+    //vel1[1] = 0.0f;
+    //vel1[2] = 0.0f;
+    //vel1[3] = 0.0f;
+    //addBoundaryRotateCube(m_numFluidParticles, pos1, width1, vel1, 10.f, m_params.particleRadius * space, &addedBoundaryParticles);
 
     ParticleInstancedMeshComponent->MarkRenderStateDirty();
     BoundaryParticleInstancedMeshComponent->MarkRenderStateDirty();
@@ -166,7 +187,7 @@ void AMaxim_de_Winter::Tick(float DeltaTime)
     computeForceAndViscosity(
         m_dVel,
         m_dEntireForces,
-        DeltaTime,
+        timeStep,
         m_dDensities,
         m_dPressures,
         m_dSortedPos,
@@ -182,14 +203,14 @@ void AMaxim_de_Winter::Tick(float DeltaTime)
     integrateSystem(
         dPos,
         m_dVel,
-        DeltaTime,
+        timeStep,
         m_numParticles);
 
-    cudaMemcpy(m_hPos, dPos, sizeof(float) * 4 * m_numParticles, cudaMemcpyDeviceToHost);
+    cudaMemcpy(m_hPos, dPos, sizeof(float) * 4u * m_numParticles, cudaMemcpyDeviceToHost);
 
     for (uint32 FluidParticleIndex = 0; FluidParticleIndex < m_numFluidParticles; ++FluidParticleIndex)
     {
-        FVector VectorLocation = FVector(m_hPos[FluidParticleIndex * 4] * widthScaling, m_hPos[FluidParticleIndex * 4 + 2] * widthScaling, m_hPos[FluidParticleIndex * 4 + 1] * widthScaling + widthScaling);
+        FVector VectorLocation = FVector(m_hPos[FluidParticleIndex * 4] * widthScaling, m_hPos[FluidParticleIndex * 4 + 2] * widthYScaling, m_hPos[FluidParticleIndex * 4 + 1] * widthScaling + widthScaling);
         //UE_LOG(LogTemp, Warning, TEXT("position: %f, %f, %f"), VectorLocation.X, VectorLocation.Y, VectorLocation.Z);
 
         //FTransform instancedTransform(VectorLocation);
@@ -199,13 +220,13 @@ void AMaxim_de_Winter::Tick(float DeltaTime)
 
     for (uint32 BoundaryParticleIndex = m_numFluidParticles; BoundaryParticleIndex < m_numParticles; ++BoundaryParticleIndex)
     {
-        FVector VectorLocation = FVector(m_hPos[BoundaryParticleIndex * 4] * widthScaling, m_hPos[BoundaryParticleIndex * 4 + 2] * widthScaling, m_hPos[BoundaryParticleIndex * 4 + 1] * widthScaling + widthScaling);
+        FVector VectorLocation = FVector(m_hPos[BoundaryParticleIndex * 4] * widthScaling, m_hPos[BoundaryParticleIndex * 4 + 2] * widthYScaling, m_hPos[BoundaryParticleIndex * 4 + 1] * widthScaling + widthScaling);
 
         //FTransform instancedTransform(VectorLocation);
         FTransform instancedTransform(FRotator::ZeroRotator, VectorLocation, FVector(radiusScaling));
         BoundaryParticleInstancedMeshComponent->UpdateInstanceTransform(BoundaryParticleIndex - m_numFluidParticles, instancedTransform, true);
     }
-    UE_LOG(LogTemp, Warning, TEXT("DeltaTime: %f"), DeltaTime);
+    //UE_LOG(LogTemp, Warning, TEXT("DeltaTime: %f"), DeltaTime);
 	ParticleInstancedMeshComponent->MarkRenderStateDirty();
     BoundaryParticleInstancedMeshComponent->MarkRenderStateDirty();
 }
@@ -322,7 +343,7 @@ void AMaxim_de_Winter::setArray(ParticleArray array, const float* data, int star
     case POSITION:
     {
         copyArrayToDevice(m_cudaPosVBO, data, start * 4 * sizeof(float), count * 4 * sizeof(float));
-        /*UE_LOG(LogTemp, Warning, TEXT("Hi!"));*/
+        UE_LOG(LogTemp, Warning, TEXT("Hi!"));
     }
     break;
 
@@ -373,7 +394,7 @@ void AMaxim_de_Winter::initGrid(uint* size, float spacing, float jitter, uint nu
                     /*FVector positionVector(m_hPos[i * 4] * particleRenderRadius / particleMeshRadius,
                         m_hPos[i * 4 + 2] * particleRenderRadius / particleMeshRadius,
                         (m_hPos[i * 4 + 1] + 1.0f) * particleRenderRadius / particleMeshRadius);*/
-                    FTransform positionVector(FVector(m_hPos[i * 4] * widthScaling, m_hPos[i * 4 + 2] * widthScaling, m_hPos[i * 4 + 1] * widthScaling + widthScaling));
+                    FTransform positionVector(FVector(m_hPos[i * 4] * widthScaling, m_hPos[i * 4 + 2] * widthYScaling, m_hPos[i * 4 + 1] * widthScaling + widthScaling));
                     ParticleInstancedMeshComponent->UpdateInstanceTransform(i, positionVector, true);
                     //UE_LOG(LogTemp, Warning, TEXT("m_hPos: %f"), m_hPos[i * 4 + 2]);
                 }
@@ -394,10 +415,58 @@ void AMaxim_de_Winter::reset()
     setArray(VELOCITY, m_hVel, 0, m_numParticles);
 }
 
+void AMaxim_de_Winter::initStartGrid(uint* size, float spacing, float jitter, uint numParticles)
+{
+    srand(1973);
+
+    for (uint z = 0; z < size[2]; z++)
+    {
+        for (uint y = 0; y < size[1]; y++)
+        {
+            for (uint x = 0; x < size[0]; x++)
+            {
+                uint i = (z * size[1] * size[0]) + (y * size[0]) + x;
+
+                if (i < numParticles)
+                {
+                    m_hPos[i * 4] = (spacing * x) + m_params.particleRadius - 0.2f;// +(frand() * 2.0f - 1.0f) * jitter;
+                    m_hPos[i * 4 + 1] = (spacing * y) + m_params.particleRadius + 0.5f;// +(frand() * 2.0f - 1.0f) * jitter;
+                    m_hPos[i * 4 + 2] = (spacing * z) + m_params.particleRadius;// +(frand() * 2.0f - 1.0f) * jitter;
+                    m_hPos[i * 4 + 3] = 1.0f;
+
+                    m_hVel[i * 4] = 0.0f;
+                    m_hVel[i * 4 + 1] = 0.0f;
+                    m_hVel[i * 4 + 2] = 0.0f;
+                    m_hVel[i * 4 + 3] = 0.0f;
+
+                    /*FVector positionVector(m_hPos[i * 4] * particleRenderRadius / particleMeshRadius,
+                        m_hPos[i * 4 + 2] * particleRenderRadius / particleMeshRadius,
+                        (m_hPos[i * 4 + 1] + 1.0f) * particleRenderRadius / particleMeshRadius);*/
+                    FTransform positionVector(FVector(m_hPos[i * 4] * widthScaling, m_hPos[i * 4 + 2] * widthYScaling, m_hPos[i * 4 + 1] * widthScaling + widthScaling));
+                    ParticleInstancedMeshComponent->UpdateInstanceTransform(i, positionVector, true);
+                    //UE_LOG(LogTemp, Warning, TEXT("m_hPos: %f"), m_hPos[i * 4 + 2]);
+                }
+            }
+        }
+    }
+}
+
+void AMaxim_de_Winter::resetStart()
+{
+    float jitter = m_params.particleRadius * 0.01f;
+    uint s = (int)ceilf(powf((float)m_numParticles, 1.0f / 3.0f));
+    uint gridSize[3];
+    gridSize[0] = gridSize[1] = gridSize[2] = s/3;
+    initStartGrid(gridSize, m_params.particleRadius * 2.0f, jitter, m_numFluidParticles);
+
+    setArray(POSITION, m_hPos, 0, m_numParticles);
+    setArray(VELOCITY, m_hVel, 0, m_numParticles);
+}
+
 void AMaxim_de_Winter::_addBoudaryCube()
 {
     float pos1[4], width1[4], vel1[4];
-    float space = 1.5f;
+    float space = 2.0f;
     //1
     pos1[0] = -0.7f;
     pos1[1] = -0.7f;
@@ -418,7 +487,7 @@ void AMaxim_de_Winter::_addBoudaryCube()
     pos1[2] = -0.7f;
     width1[0] = 0.2f;
     width1[1] = 0.2f;
-    width1[2] = 0.01f;
+    width1[2] = 0.02f;
     addBoundaryCube(m_numFluidParticles, pos1, width1, vel1, m_params.particleRadius * space, &addedBoundaryParticles);
     //3
     pos1[0] = -0.5f;
@@ -443,6 +512,65 @@ void AMaxim_de_Winter::_addBoudaryCube()
     width1[0] = 0.2f;
     width1[1] = 0.01f;
     width1[2] = 0.2f;
+    addBoundaryCube(m_numFluidParticles, pos1, width1, vel1, m_params.particleRadius * space, &addedBoundaryParticles);
+}
+
+void AMaxim_de_Winter::_addBoudaryCube2()
+{
+    float pos1[4], width1[4], vel1[4];
+    float space = 1.3f;
+    pos1[0] = -0.2f;
+    pos1[1] = 0.28f;
+    pos1[2] = -1.1f;
+    pos1[3] = 0.0f;
+    width1[0] = 0.5f;
+    width1[1] = 0.01f;
+    width1[2] = 2.0f;
+    width1[3] = 0.0f;
+    vel1[0] = 0.0f;
+    vel1[1] = 0.0f;
+    vel1[2] = 0.0f;
+    vel1[3] = 0.0f;
+    addBoundaryRotateCube(m_numFluidParticles, pos1, width1, vel1, 0.3f, m_params.particleRadius * space, &addedBoundaryParticles);
+    //2
+    pos1[0] = -0.7f;
+    pos1[1] = 0.1f;
+    pos1[2] = -1.1f;
+    width1[0] = 1.0f;
+    width1[1] = 0.03f;
+    width1[2] = 2.0f;
+    addBoundaryRotateCube(m_numFluidParticles, pos1, width1, vel1, -0.4f, m_params.particleRadius * space, &addedBoundaryParticles);
+    //3
+    pos1[0] = -0.8f;
+    pos1[1] = -0.9f;
+    pos1[2] = -1.1f;
+    width1[0] = 1.8f;
+    width1[1] = 0.01f;
+    width1[2] = 2.0f;
+    addBoundaryRotateCube(m_numFluidParticles, pos1, width1, vel1, 0.2f, m_params.particleRadius * space, &addedBoundaryParticles);
+    //4
+    pos1[0] = 0.3f;
+    pos1[1] = 0.5f;
+    pos1[2] = -1.1f;
+    width1[0] = 0.01f;
+    width1[1] = 0.3f;
+    width1[2] = 2.0f;
+    addBoundaryCube(m_numFluidParticles, pos1, width1, vel1, m_params.particleRadius * space, &addedBoundaryParticles);
+    //5
+    pos1[0] = -0.7f;
+    pos1[1] = 0.1f;
+    pos1[2] = -1.1f;
+    width1[0] = 0.01f;
+    width1[1] = 0.4f;
+    width1[2] = 2.0f;
+    addBoundaryCube(m_numFluidParticles, pos1, width1, vel1, m_params.particleRadius * space, &addedBoundaryParticles);
+    //6
+    pos1[0] = 1.0f;
+    pos1[1] = -0.5f;
+    pos1[2] = -1.1f;
+    width1[0] = 0.01f;
+    width1[1] = 0.4f;
+    width1[2] = 2.0f;
     addBoundaryCube(m_numFluidParticles, pos1, width1, vel1, m_params.particleRadius * space, &addedBoundaryParticles);
 }
 
@@ -474,7 +602,52 @@ void AMaxim_de_Winter::addBoundaryCube(int start, float* pos, float* width, floa
                     m_hVel[index * 4 + 2] = vel[2];
                     m_hVel[index * 4 + 3] = vel[3];
                     index++;
-                    FTransform positionVector(FVector(m_hPos[index * 4] * widthScaling, m_hPos[index * 4 + 2] * widthScaling, m_hPos[index * 4 + 1] * widthScaling + widthScaling));
+                    FTransform positionVector(FVector(m_hPos[index * 4] * widthScaling, m_hPos[index * 4 + 2] * widthYScaling, m_hPos[index * 4 + 1] * widthScaling + widthScaling));
+                    BoundaryParticleInstancedMeshComponent->UpdateInstanceTransform(index - m_numFluidParticles, positionVector, true);
+                    //index++;
+                    i++;
+                }
+            }
+        }
+    }
+
+    setArray(POSITION, m_hPos + (start + *addedBParticles) * 4, start + *addedBParticles, i);
+    setArray(VELOCITY, m_hVel + (start + *addedBParticles) * 4, start + *addedBParticles, i);
+
+    *addedBParticles += i;
+}
+
+void AMaxim_de_Winter::addBoundaryRotateCube(int start, float* pos, float* width, float* vel, float rotate, float particleDiameter, uint* addedBParticles)
+{
+    uint index = start + *addedBParticles;
+    uint i = 0;
+    float dTheta = tan(rotate);
+    float dx, dy, dz;
+
+    for (int z = 0; z <= width[2] / particleDiameter; z++)
+    {
+        for (int y = 0; y <= width[1] / particleDiameter; y++)
+        {
+            for (int x = 0; x <= width[0] / particleDiameter; x++)
+            {
+                dx = x * particleDiameter;
+                dy = y * particleDiameter + dx* dTheta;
+                dz = z * particleDiameter;
+                //float jitter = m_params.particleRadius * 0.01f;
+
+                if (index < m_numParticles)
+                {
+                    m_hPos[index * 4] = pos[0] + dx;
+                    m_hPos[index * 4 + 1] = pos[1] + dy;
+                    m_hPos[index * 4 + 2] = pos[2] + dz;
+                    m_hPos[index * 4 + 3] = pos[3];
+
+                    m_hVel[index * 4] = vel[0];
+                    m_hVel[index * 4 + 1] = vel[1];
+                    m_hVel[index * 4 + 2] = vel[2];
+                    m_hVel[index * 4 + 3] = vel[3];
+                    index++;
+                    FTransform positionVector(FVector(m_hPos[index * 4] * widthScaling, m_hPos[index * 4 + 2] * widthYScaling, m_hPos[index * 4 + 1] * widthScaling + widthScaling));
                     BoundaryParticleInstancedMeshComponent->UpdateInstanceTransform(index - m_numFluidParticles, positionVector, true);
                     //index++;
                     i++;
@@ -492,7 +665,7 @@ void AMaxim_de_Winter::addBoundaryCube(int start, float* pos, float* width, floa
 void AMaxim_de_Winter::_addFluidCube()
 {
     float pos1[4], width1[4], vel1[4];
-    float space = 1.5f;
+    float space = 2.0f;
     pos1[0] = -0.65f;
     pos1[1] = -0.65f;
     pos1[2] = -0.65f;
@@ -535,7 +708,7 @@ void AMaxim_de_Winter::addFluidCube(int start, float* pos, float* width, float* 
                     m_hVel[index * 4 + 2] = vel[2];
                     m_hVel[index * 4 + 3] = vel[3];
                     index++;
-                    FTransform positionVector(FVector(m_hPos[index * 4] * widthScaling, m_hPos[index * 4 + 2] * widthScaling, m_hPos[index * 4 + 1] * widthScaling + widthScaling));
+                    FTransform positionVector(FVector(m_hPos[index * 4] * widthScaling, m_hPos[index * 4 + 2] * widthYScaling, m_hPos[index * 4 + 1] * widthScaling + widthScaling));
                     ParticleInstancedMeshComponent->UpdateInstanceTransform(index, positionVector, true);
                     //index++;
                 }

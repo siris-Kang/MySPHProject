@@ -31,7 +31,7 @@
 
 #define GRID_SIZE       (64u)
 #define NUM_PARTICLES   (10000u)
-#define NUM_BOUNDARY_PARTICLES (5000u)
+#define NUM_BOUNDARY_PARTICLES (10000u)
 
 
 UCLASS(Blueprintable)
@@ -79,7 +79,7 @@ public:
         PRESSURE
     };
 
-    void reset();
+    //void reset();
 
     void   setArray(ParticleArray array, const float* data, int start, int count);
 
@@ -120,13 +120,20 @@ public:
     void addFluidCube(int start, float* pos, float* width, float* vel, float particleDiameter);
     UFUNCTION(BlueprintCallable, Category = Buttonfunction)
         void _addFluidCube();
+    void _addBoudaryCube2();
+    void addBoundaryRotateCube(int start, float* pos, float* width, float* vel, float rotate, float particleDiameter, uint* addedBParticles);
 
 protected: // methods
 
     void initialize(int numParticles);
     void finalize();
 
+    UFUNCTION(BlueprintCallable, Category = "Custom")
+        void reset();
+    UFUNCTION(BlueprintCallable, Category = "Custom")
+        void resetStart();
     void initGrid(uint* size, float spacing, float jitter, uint numParticles);
+    void initStartGrid(uint* size, float spacing, float jitter, uint numParticles);
 
 protected: // data
     bool m_bInitialized, m_bUseOpenGL;
@@ -134,6 +141,7 @@ protected: // data
     uint32 m_numParticles;
 
     float widthScaling;
+    float widthYScaling;
     float radiusScaling;
 
     FVector Gravity = FVector(0.0f, 0.0f, -9.80665f);
@@ -190,4 +198,5 @@ protected: // data
 
     uint32 m_solverIterations;
 
+    float timeStep;
 };
