@@ -26,8 +26,8 @@
 #endif
 
 #define GRID_SIZE       (64u)
-#define NUM_PARTICLES   (2000u)
-#define NUM_BOUNDARY_PARTICLES (2000u)
+#define NUM_PARTICLES   (10000u)
+#define NUM_BOUNDARY_PARTICLES (10000u)
 
 UCLASS(Blueprintable)
 class SPHPROJECT_API ASPHFluidActor : public AActor
@@ -102,9 +102,19 @@ protected: // data
 	uint32 m_numFluidParticles;
 	uint32 m_numParticles;
 
-	float widthScaling;
-	float widthYScaling;
-	float radiusScaling;
+	// Tunable live in the editor (Details panel) — no recompile needed.
+	UPROPERTY(EditAnywhere, Category = "SPH|Visual")
+		float widthScaling;       // horizontal/vertical spread (sim -> UE units)
+	UPROPERTY(EditAnywhere, Category = "SPH|Visual")
+		float widthYScaling;      // depth spread (smaller = flatter slab)
+	UPROPERTY(EditAnywhere, Category = "SPH|Visual")
+		float radiusScaling;      // rendered particle size
+
+	// Simulation speed: dt = min(DeltaTime * SimSpeed, MaxStepTime). FPS-independent.
+	UPROPERTY(EditAnywhere, Category = "SPH|Sim", meta = (ClampMin = "0.0"))
+		float SimSpeed = 1.0f;    // 1 = real-time, <1 = slow motion
+	UPROPERTY(EditAnywhere, Category = "SPH|Sim", meta = (ClampMin = "0.001", ClampMax = "0.05"))
+		float MaxStepTime = 0.03f; // stability clamp on the integration step
 
 	// CPU data
 	float* m_hPos;
@@ -152,4 +162,8 @@ protected: // data
 	uint32 m_solverIterations;
 
 	float timeStep;
+
+	// reusable buffers for batched instance-transform updates (avoid per-frame realloc)
+	TArray<FTransform> m_fluidTransforms;
+	TArray<FTransform> m_boundaryTransforms;
 };

@@ -31,6 +31,17 @@ ASPHFluidActor::ASPHFluidActor()
 		BoundaryParticleInstancedMeshComponent->SetStaticMesh(SphereMesh.Object);
 	}
 
+	// Render-only particles: drop the per-frame costs. Shadows off (thousands of
+	// dynamic shadow casters are the biggest render cost), no collision, no
+	// navigation, Movable so transform updates are cheap.
+	for (UInstancedStaticMeshComponent* C : { ParticleInstancedMeshComponent, BoundaryParticleInstancedMeshComponent })
+	{
+		C->SetMobility(EComponentMobility::Movable);
+		C->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		C->SetCanEverAffectNavigation(false);
+		C->SetCastShadow(false);
+	}
+
 	m_bInitialized = false;
 	m_numParticles = NUM_PARTICLES + NUM_BOUNDARY_PARTICLES;
 	m_numFluidParticles = NUM_PARTICLES;
@@ -112,6 +123,10 @@ void ASPHFluidActor::Tick(float DeltaTime)
 		return;
 	}
 
+	// FPS-independent timestep: scale by real frame time, clamp for stability.
+	// (Previously a fixed 0.03 per frame -> sim speed scaled with FPS.)
+	const float dt = FMath::Min(DeltaTime * SimSpeed, MaxStepTime);
+
 	float* dPos = (float*)m_cudaPosVBO;
 
 	setParameters(&m_params);
@@ -131,36 +146,39 @@ void ASPHFluidActor::Tick(float DeltaTime)
 		m_numParticles, m_numFluidParticles, m_numGridCells);
 
 	computeForceAndViscosity(
-		m_dVel, m_dEntireForces, timeStep, m_dDensities, m_dPressures,
+		m_dVel, m_dEntireForces, dt, m_dDensities, m_dPressures,
 		m_dSortedPos, m_dSortedVel, m_dGridParticleIndex, m_dCellStart, m_dCellEnd,
 		m_numParticles, m_numFluidParticles, m_numGridCells);
 
-	integrateSystem(dPos, m_dVel, timeStep, m_numParticles);
+	integrateSystem(dPos, m_dVel, dt, m_numParticles);
 
 	cudaMemcpy(m_hPos, dPos, sizeof(float) * 4u * m_numParticles, cudaMemcpyDeviceToHost);
 
+	// Batch the transform updates: one call per component, no per-frame
+	// MarkRenderStateDirty (which would recreate the whole render proxy).
+	const uint32 numBoundary = m_numParticles - m_numFluidParticles;
+
+	m_fluidTransforms.SetNumUninitialized(m_numFluidParticles);
 	for (uint32 i = 0; i < m_numFluidParticles; ++i)
 	{
 		FVector Location(
 			m_hPos[i * 4] * widthScaling,
 			m_hPos[i * 4 + 2] * widthYScaling,
 			m_hPos[i * 4 + 1] * widthScaling + widthScaling);
-		FTransform InstancedTransform(FRotator::ZeroRotator, Location, FVector(radiusScaling));
-		ParticleInstancedMeshComponent->UpdateInstanceTransform(i, InstancedTransform, true);
+		m_fluidTransforms[i] = FTransform(FRotator::ZeroRotator, Location, FVector(radiusScaling));
 	}
+	ParticleInstancedMeshComponent->BatchUpdateInstancesTransforms(0, m_fluidTransforms, /*bWorldSpace*/true, /*bMarkRenderStateDirty*/true, /*bTeleport*/true);
 
+	m_boundaryTransforms.SetNumUninitialized(numBoundary);
 	for (uint32 i = m_numFluidParticles; i < m_numParticles; ++i)
 	{
 		FVector Location(
 			m_hPos[i * 4] * widthScaling,
 			m_hPos[i * 4 + 2] * widthYScaling,
 			m_hPos[i * 4 + 1] * widthScaling + widthScaling);
-		FTransform InstancedTransform(FRotator::ZeroRotator, Location, FVector(radiusScaling));
-		BoundaryParticleInstancedMeshComponent->UpdateInstanceTransform(i - m_numFluidParticles, InstancedTransform, true);
+		m_boundaryTransforms[i - m_numFluidParticles] = FTransform(FRotator::ZeroRotator, Location, FVector(radiusScaling));
 	}
-
-	ParticleInstancedMeshComponent->MarkRenderStateDirty();
-	BoundaryParticleInstancedMeshComponent->MarkRenderStateDirty();
+	BoundaryParticleInstancedMeshComponent->BatchUpdateInstancesTransforms(0, m_boundaryTransforms, /*bWorldSpace*/true, /*bMarkRenderStateDirty*/true, /*bTeleport*/true);
 }
 
 void ASPHFluidActor::initialize(int numParticles)
@@ -355,9 +373,12 @@ void ASPHFluidActor::initStartGrid(uint* size, float spacing, float jitter, uint
 void ASPHFluidActor::resetStart()
 {
 	float jitter = m_params.particleRadius * 0.01f;
-	uint s = (int)ceilf(powf((float)m_numParticles, 1.0f / 3.0f));
+	// Size the grid to hold ALL fluid particles. The old `s/3` made a grid far
+	// too small (e.g. 27 cells for 500 particles), leaving the rest stacked at
+	// the memset origin (0,0,0) -> density singularity -> the sim exploded.
+	uint s = (uint)ceilf(powf((float)m_numFluidParticles, 1.0f / 3.0f));
 	uint gridSize[3];
-	gridSize[0] = gridSize[1] = gridSize[2] = s / 3;
+	gridSize[0] = gridSize[1] = gridSize[2] = s;
 	initStartGrid(gridSize, m_params.particleRadius * 2.0f, jitter, m_numFluidParticles);
 
 	setArray(POSITION, m_hPos, 0, m_numParticles);
