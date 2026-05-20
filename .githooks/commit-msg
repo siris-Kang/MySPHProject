@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MSG_FILE="$1"
+
+first_line="$(head -n 1 "$MSG_FILE" | tr -d '\r')"
+if [[ -z "${first_line// }" ]]; then
+  exit 0
+fi
+
+case "$first_line" in
+  Merge\ *|fixup!\ *|squash!\ *)
+    exit 0
+    ;;
+esac
+
+jira_key="$(grep -oE '[A-Z][A-Z0-9]+-[0-9]+' "$MSG_FILE" | head -n 1 || true)"
+
+if [[ -z "$jira_key" ]]; then
+  branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  if [[ "$branch" =~ ([A-Z][A-Z0-9]+-[0-9]+) ]]; then
+    jira_key="${BASH_REMATCH[1]}"
+  fi
+fi
+
+normalize_type() {
+  local raw_type="$1"
+  local normalized_type
+
+  normalized_type="$(printf '%s' "$raw_type" | tr '[:upper:]' '[:lower:]' | xargs)"
+
+  case "$normalized_type" in
+    feat)
+      TYPE_EMOJI="✨"
+      TYPE_LABEL="Feat"
+      ;;
+    fix)
+      TYPE_EMOJI="🐛"
+      TYPE_LABEL="Fix"
+      ;;
+    docs)
+      TYPE_EMOJI="📝"
+      TYPE_LABEL="Docs"
+      ;;
+    refactor)
+      TYPE_EMOJI="♻️"
+      TYPE_LABEL="Refactor"
+      ;;
+    style)
+      TYPE_EMOJI="🎨"
+      TYPE_LABEL="Style"
+      ;;
+    test)
+      TYPE_EMOJI="✅"
+      TYPE_LABEL="Test"
+      ;;
+    chore)
+      TYPE_EMOJI="🔨"
+      TYPE_LABEL="Chore"
+      ;;
+    hotfix)
+      TYPE_EMOJI="⚠️"
+      TYPE_LABEL="Hotfix"
+      ;;
+    *)
+      echo "Unsupported commit type: '$raw_type'" >&2
+      echo "allowed: feat fix docs refactor style test chore hotfix" >&2
+      exit 1
+      ;;
+  esac
+}
+
+type_part=""
+rest_part=""
+normalized_first=""
+
+normalized_first="$(printf '%s' "$first_line" | sed -E 's/^[[:space:]]*([^[:alnum:]\[]+[[:space:]]*)+//')"
+
+if [[ "$normalized_first" =~ ^\[([[:alpha:]]+)\][[:space:]]*:?[[:space:]]*(.+)$ ]]; then
+  type_part="${BASH_REMATCH[1]}"
+  rest_part="${BASH_REMATCH[2]}"
+elif [[ "$normalized_first" =~ ^([[:alpha:]]+)[[:space:]]*:[[:space:]]*(.+)$ ]]; then
+  type_part="${BASH_REMATCH[1]}"
+  rest_part="${BASH_REMATCH[2]}"
+else
+  echo "First line must use either '[Type] subject' or 'type: subject' format." >&2
+  echo "examples: [Test] hook check / [TEST]: hook check / test: hook check" >&2
+  exit 1
+fi
+
+normalize_type "$type_part"
+rest_part="$(printf '%s' "$rest_part" | sed -E 's/\[[A-Z][A-Z0-9]+-[0-9]+\]//g' | xargs)"
+
+if [[ -z "$rest_part" ]]; then
+  echo "Commit subject is empty." >&2
+  exit 1
+fi
+
+new_first="${TYPE_EMOJI} [${TYPE_LABEL}] ${rest_part}"
+
+tmp="$(mktemp)"
+has_jira_line=0
+
+{
+  echo "$new_first"
+
+  first_body_line=1
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    clean_line="$(printf '%s' "$line" | tr -d '\r')"
+
+    if [[ "$first_body_line" -eq 1 ]]; then
+      first_body_line=0
+      if [[ -n "$clean_line" ]]; then
+        echo ""
+      fi
+    fi
+
+    if [[ -n "$jira_key" ]] && echo "$clean_line" | grep -qE "^[[:space:]]*-[[:space:]]*${jira_key}[[:space:]]*$"; then
+      has_jira_line=1
+    fi
+
+    echo "$clean_line"
+  done < <(tail -n +2 "$MSG_FILE")
+
+  if [[ -n "$jira_key" && "$has_jira_line" -eq 0 ]]; then
+    if [[ "$first_body_line" -eq 1 ]]; then
+      echo ""
+    fi
+    echo "- ${jira_key}"
+  fi
+} > "$tmp"
+
+cat "$tmp" > "$MSG_FILE"
+rm "$tmp"
