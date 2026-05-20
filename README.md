@@ -49,3 +49,13 @@ bf-sph-ue4/                UE4.27 프로젝트 아카이브
 - **FPS 독립 타임스텝**: 고정 `0.03/frame`(속도가 프레임레이트에 비례) →
   `dt = min(DeltaTime * SimSpeed, MaxStepTime)`.
 - `SimSpeed`, `MaxStepTime`, 시각화 스케일을 `EditAnywhere`로 노출 → 재컴파일 없이 에디터에서 튜닝.
+
+### SPH 안정성 / 버그 수정
+- **초기화 폭발 버그**: `resetStart`의 초기 격자 크기가 `s/3`로 너무 작아(예: 500개에 27칸)
+  대부분의 유체 입자가 원점(0,0,0)에 겹친 채 시작 → 밀도 특이점 → 폭발. 격자를
+  `ceil(유체수^(1/3))`로 수정해 모든 입자를 제대로 배치.
+- **경계 입자 고정**: force 커널이 boundary 입자에도 중력을 누적해 가라앉던 문제 →
+  boundary 분기에서 속도/힘을 0으로 고정(밀도/압력엔 계속 기여하는 정적 벽).
+- **압력 불안정 튜닝**: `pressure = GasStiffness × (density − RestDensity)`에서 RestDensity가
+  실제 정지밀도보다 낮으면 전 입자가 양압 → 팽창/폭발. `RestDensity`/`GasStiffness`/`Viscosity`를
+  `EditAnywhere`로 노출해 폭발이 잦아들 때까지 에디터에서 실시간 튜닝.

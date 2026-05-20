@@ -509,8 +509,11 @@ void computeForceAndViscosityDevice(float4* newVelocities,
     }
     else
     {
-        entireForces[originalIndex] = make_float4(entireForce, 0.0f);
-        newVelocities[originalIndex] += make_float4(deltaTime * (externalForce / params.boundaryParticleMass), 0.0f);
+        // Boundary particles are static walls: they contribute to fluid density/
+        // pressure (computed above) but must never move themselves, so pin their
+        // velocity (and stored force) to zero instead of accumulating gravity.
+        entireForces[originalIndex] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        newVelocities[originalIndex] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 }
 

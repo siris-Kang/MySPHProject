@@ -116,6 +116,16 @@ protected: // data
 	UPROPERTY(EditAnywhere, Category = "SPH|Sim", meta = (ClampMin = "0.001", ClampMax = "0.05"))
 		float MaxStepTime = 0.03f; // stability clamp on the integration step
 
+	// SPH physics — tune live to fix instability. pressure = GasStiffness*(density - RestDensity).
+	// If the fluid explodes, the kernel's rest-spacing density exceeds RestDensity:
+	// raise RestDensity (toward the real value, ~2000+) and/or lower GasStiffness.
+	UPROPERTY(EditAnywhere, Category = "SPH|Physics", meta = (ClampMin = "1.0"))
+		float RestDensity = 998.29f;
+	UPROPERTY(EditAnywhere, Category = "SPH|Physics", meta = (ClampMin = "0.0"))
+		float GasStiffness = 3.0f;
+	UPROPERTY(EditAnywhere, Category = "SPH|Physics", meta = (ClampMin = "0.0"))
+		float Viscosity = 3.5f;
+
 	// CPU data
 	float* m_hPos;
 	float* m_hVel;

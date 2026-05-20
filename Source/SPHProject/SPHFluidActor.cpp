@@ -127,6 +127,11 @@ void ASPHFluidActor::Tick(float DeltaTime)
 	// (Previously a fixed 0.03 per frame -> sim speed scaled with FPS.)
 	const float dt = FMath::Min(DeltaTime * SimSpeed, MaxStepTime);
 
+	// Push live-tunable physics params to the GPU (editable in the actor Details panel).
+	m_params.waterRestDensity     = RestDensity;
+	m_params.gasStiffnessConstant = GasStiffness;
+	m_params.viscosityCoefficient = Viscosity;
+
 	float* dPos = (float*)m_cudaPosVBO;
 
 	setParameters(&m_params);
