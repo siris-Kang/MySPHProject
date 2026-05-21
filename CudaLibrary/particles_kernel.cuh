@@ -49,6 +49,10 @@ struct SimParams
     float restitutionCoefficient;
     float surfaceTension;
 
+    // Direct boundary repulsion: pushes fluid away from boundary particles
+    // regardless of pressure (so low-pressure surface fluid can't pass through).
+    float boundaryForceScale;
+
     //Marching Cube
     float CflScale;
 

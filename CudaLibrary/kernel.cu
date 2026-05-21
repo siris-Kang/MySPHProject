@@ -131,6 +131,32 @@ struct integrate_functor
             vel.y *= params.boundaryDamping;
         }
 
+        // Geometric tilted-floor (slide) collision — fluid only (posData.w==1; the
+        // boundary particles, w==0, are visual and must keep their slab shape).
+        // Hard no-penetration constraint: project onto the surface, cancel the into-
+        // surface velocity. The plane matches the visual boundary slide in _addBoudaryCube2
+        // (pos -0.7,-0.3,-0.1, tilt 0.4): point on top face, normal (-sin a, cos a, 0).
+        // Finite slide footprint: x in [-0.7, 0.5], z in [-0.1, 0.5] (matches the
+        // boundary slab). Outside it, no collision -> fluid falls off the edge.
+        if (posData.w > 0.5f &&
+            pos.x >= -0.7f && pos.x <= 0.5f &&
+            pos.z >= -0.1f && pos.z <= 0.5f)
+        {
+            const float3 rampPoint  = make_float3(-0.7f, -0.25f, 0.0f);
+            const float3 rampNormal = make_float3(-0.38942f, 0.92106f, 0.0f);
+            float distToRamp = dot(pos - rampPoint, rampNormal);
+            // Only resolve shallow penetration (just below the surface). Particles
+            // deeper than smoothingLength below the plane have already fallen past /
+            // under the slide -> leave them, else they'd teleport back up onto it.
+            if (distToRamp < params.particleRadius && distToRamp > -params.smoothingLength)
+            {
+                pos += (params.particleRadius - distToRamp) * rampNormal;
+                float vn = dot(vel, rampNormal);
+                if (vn < 0.0f) vel -= vn * rampNormal;   // slide, no bounce
+                vel *= 0.99f;                            // mild friction
+            }
+        }
+
         // store new position and velocity
         thrust::get<0>(t) = make_float4(pos, posData.w);
         thrust::get<1>(t) = make_float4(vel, velData.w);
@@ -290,6 +316,7 @@ float computeDensityByCell(int3    gridPos,
     uint    originalIndex,
     float4* oldPosArray,
     float4* oldVelArray,
+    float*  boundaryPsi,
     uint* cellStart,
     uint* cellEnd,
     uint* gridParticleIndex,
@@ -309,17 +336,19 @@ float computeDensityByCell(int3    gridPos,
 
         for (uint j = startIndex; j < endIndex; j++)
         {
+            uint jOriginalIndex = gridParticleIndex[j];
             float3 jPos = make_float3(oldPosArray[j]);
-            // float3 jVel = make_float3(oldVelArray[j]);
             float3 iToj = indexPos - jPos;
             float length_iToj = length(iToj);
 
             if (length_iToj < params.smoothingLength)
             {
-                if (originalIndex < numFluidParticles)
+                // Contribution depends on the NEIGHBOUR's type: fluid uses mass,
+                // boundary uses its Akinci effective volume Psi (= mass-equivalent).
+                if (jOriginalIndex < numFluidParticles)
                     density += params.fluidParticleMass * kernelPoly6(iToj, params.smoothingLength);
                 else
-                    density += params.boundaryParticleMass * kernelPoly6(iToj, params.smoothingLength);
+                    density += boundaryPsi[jOriginalIndex] * kernelPoly6(iToj, params.smoothingLength);
             }
 
             //if (j != index && length_iToj < params.smoothingLength)  // check not colliding with self and distance < h
@@ -341,6 +370,7 @@ void computeDensityAndPressureDevice(float* desities,
     float* pressures,
     float4* oldPosArray,               // input: sorted positions
     float4* oldVelArray,               // input: sorted velocities
+    float* boundaryPsi,                // input: Akinci boundary volumes (per original index)
     uint* gridParticleIndex,         // input: sorted particle indices
     uint* cellStart,
     uint* cellEnd,
@@ -371,14 +401,77 @@ void computeDensityAndPressureDevice(float* desities,
             for (int x = -1; x <= 1; x++)
             {
                 int3 neighbourPos = gridPos + make_int3(x, y, z);
-                density += computeDensityByCell(neighbourPos, index, indexPos, indexVel, originalIndex, oldPosArray, oldVelArray, cellStart, cellEnd, gridParticleIndex, numFluidParticles);
+                density += computeDensityByCell(neighbourPos, index, indexPos, indexVel, originalIndex, oldPosArray, oldVelArray, boundaryPsi, cellStart, cellEnd, gridParticleIndex, numFluidParticles);
             }
         }
     }
 
     pressure = params.gasStiffnessConstant * (density - params.waterRestDensity);
+    pressure = fmaxf(pressure, 0.0f);   // clamp tensile pressure (geometric collision handles containment; this keeps the fluid stable)
     desities[originalIndex] = density;
     pressures[originalIndex] = pressure;
+}
+
+
+// Akinci 2012 boundary handling --------------------------------------------
+// Boundary particles have no fixed mass; instead each gets an effective volume
+// from its OWN packing, which corrects the one-sided neighbour deficiency at a
+// wall. Psi_b = restDensity / sum_k W(b - k) over boundary neighbours (incl self).
+// Boundaries are static, so this is computed once.
+
+__device__
+float boundaryKernelSumByCell(int3   gridPos,
+    float3  indexPos,
+    float4* oldPosArray,
+    uint*   cellStart,
+    uint*   cellEnd,
+    uint*   gridParticleIndex,
+    uint    numFluidParticles)
+{
+    uint gridHash = calcGridHash(gridPos);
+    uint startIndex = cellStart[gridHash];
+
+    float sum = 0.f;
+    if (startIndex != 0xffffffff)
+    {
+        uint endIndex = cellEnd[gridHash];
+        for (uint j = startIndex; j < endIndex; j++)
+        {
+            if (gridParticleIndex[j] < numFluidParticles) continue;   // boundary neighbours only
+            float3 jPos = make_float3(oldPosArray[j]);
+            float3 rij = indexPos - jPos;
+            if (length(rij) < params.smoothingLength)
+                sum += kernelPoly6(rij, params.smoothingLength);
+        }
+    }
+    return sum;
+}
+
+__global__
+void computeBoundaryPsiDevice(float*  boundaryPsi,
+    float4* oldPosArray,
+    uint*   gridParticleIndex,
+    uint*   cellStart,
+    uint*   cellEnd,
+    uint    numParticles,
+    uint    numFluidParticles)
+{
+    uint index = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (index >= numParticles) return;
+
+    uint originalIndex = gridParticleIndex[index];
+    if (originalIndex < numFluidParticles) return;   // boundary particles only
+
+    float3 indexPos = make_float3(oldPosArray[index]);
+    int3 gridPos = calcGridPos(indexPos);
+
+    float kernelSum = 0.f;
+    for (int z = -1; z <= 1; z++)
+        for (int y = -1; y <= 1; y++)
+            for (int x = -1; x <= 1; x++)
+                kernelSum += boundaryKernelSumByCell(gridPos + make_int3(x, y, z), indexPos, oldPosArray, cellStart, cellEnd, gridParticleIndex, numFluidParticles);
+
+    boundaryPsi[originalIndex] = (kernelSum > 1e-8f) ? (params.waterRestDensity / kernelSum) : params.boundaryParticleMass;
 }
 
 
@@ -386,6 +479,7 @@ void computeDensityAndPressureDevice(float* desities,
 __device__
 void computeForceAndViscosityByCell(float3* pressureForce,
     float3* viscosity,
+    float*  boundaryPsi,
     int3    gridPos,
     uint    index,
     float3  indexPos,
@@ -424,29 +518,31 @@ void computeForceAndViscosityByCell(float3* pressureForce,
             float3 iTojVel = indexVel - jVel;
             // float lengthVij = length(iTojVel);
 
-            if (j != index && lengthRij < params.smoothingLength)  // check not colliding with self and distance < h
+            if (j != index && lengthRij < params.smoothingLength)  // not self, within support
             {
-                if (originalIndex < numFluidParticles)
-                { //fluid particle
+                float3 spiky = kernelSpikyGradient(iTojPos, params.smoothingLength);
+
+                if (jOriginalIndex < numFluidParticles)
+                { // fluid neighbour: standard symmetric pressure + viscosity
                     *pressureForce += params.fluidParticleMass
                         * (pressures[originalIndex] / (densities[originalIndex] * densities[originalIndex]) + pressures[jOriginalIndex] / (densities[jOriginalIndex] * densities[jOriginalIndex]))
-                        * kernelSpikyGradient(iTojPos, params.smoothingLength);
+                        * spiky;
 
                     *viscosity += (params.fluidParticleMass / densities[originalIndex])
                         * (dot(iTojPos, iTojVel) / (dot(iTojPos, iTojPos) + 0.01f * params.smoothingLength * params.smoothingLength))
                         * kernelPoly6Gradient(iTojPos, params.smoothingLength);
                 }
                 else
-                { //boundary particle
-                    *pressureForce += params.boundaryParticleMass
-                        * (pressures[originalIndex] / (densities[originalIndex] * densities[originalIndex]) + pressures[jOriginalIndex] / (densities[jOriginalIndex] * densities[jOriginalIndex]))
-                        * kernelSpikyGradient(iTojPos, params.smoothingLength);
-
-                    *viscosity += (params.boundaryParticleMass / densities[originalIndex])
-                        * (dot(iTojPos, iTojVel) / (dot(iTojPos, iTojPos) + 0.01f * params.smoothingLength * params.smoothingLength))
-                        * kernelPoly6Gradient(iTojPos, params.smoothingLength);
+                { // boundary neighbour (Akinci): effective mass = Psi, pressure mirrored
+                  // from the fluid particle itself -> the wall pushes back with the
+                  // fluid's own pressure (physical no-penetration, no penalty fudge).
+                  // Clamp to >=0 so the wall only ever PUSHES (never pulls fluid in
+                  // when the fluid is under tension / negative pressure).
+                    float pBoundary = fmaxf(pressures[originalIndex], 0.0f);
+                    *pressureForce += boundaryPsi[jOriginalIndex]
+                        * (pBoundary / (densities[originalIndex] * densities[originalIndex]))
+                        * spiky;
                 }
-
             }
         }
     }
@@ -458,6 +554,7 @@ void computeForceAndViscosityDevice(float4* newVelocities,
     float   deltaTime,
     float* densities,
     float* pressures,
+    float* boundaryPsi,                // input: Akinci boundary volumes (per original index)
     float4* oldPosArray,               // input: sorted positions
     float4* oldVelArray,               // input: sorted velocities
     uint* gridParticleIndex,         // input: sorted particle indices
@@ -492,7 +589,7 @@ void computeForceAndViscosityDevice(float4* newVelocities,
             for (int x = -1; x <= 1; x++)
             {
                 int3 neighbourPos = gridPos + make_int3(x, y, z);
-                computeForceAndViscosityByCell(&pressureForce, &viscosity, neighbourPos, index, indexPos, indexVel, originalIndex, oldPosArray, oldVelArray, densities, pressures, cellStart, cellEnd, gridParticleIndex, numFluidParticles);
+                computeForceAndViscosityByCell(&pressureForce, &viscosity, boundaryPsi, neighbourPos, index, indexPos, indexVel, originalIndex, oldPosArray, oldVelArray, densities, pressures, cellStart, cellEnd, gridParticleIndex, numFluidParticles);
             }
         }
     }
@@ -675,8 +772,32 @@ extern "C"
         return error;
     }
 
+    // Akinci boundary volumes: compute once (boundaries are static).
+    void computeBoundaryPsi(float* boundaryPsi,
+        float* sortedPos,
+        uint*  gridParticleIndex,
+        uint*  cellStart,
+        uint*  cellEnd,
+        uint   numParticles,
+        uint   numFluidParticles)
+    {
+        uint numThreads, numBlocks;
+        computeGridSize(numParticles, 64, numBlocks, numThreads);
+
+        computeBoundaryPsiDevice << < numBlocks, numThreads >> > (boundaryPsi,
+            (float4*)sortedPos,
+            gridParticleIndex,
+            cellStart,
+            cellEnd,
+            numParticles,
+            numFluidParticles);
+
+        getLastCudaError("computeBoundaryPsi failed");
+    }
+
     void computeDensityAndPressure(float* densities,
         float* pressures,
+        float* boundaryPsi,
         float* sortedPos,
         float* sortedVel,
         uint* gridParticleIndex,
@@ -695,6 +816,7 @@ extern "C"
             pressures,
             (float4*)sortedPos,
             (float4*)sortedVel,
+            boundaryPsi,
             gridParticleIndex,
             cellStart,
             cellEnd,
@@ -710,6 +832,7 @@ extern "C"
         float  deltaTime,
         float* desities,
         float* pressures,
+        float* boundaryPsi,
         float* sortedPos,
         float* sortedVel,
         uint* gridParticleIndex,
@@ -729,6 +852,7 @@ extern "C"
             deltaTime,
             desities,
             pressures,
+            boundaryPsi,
             (float4*)sortedPos,
             (float4*)sortedVel,
             gridParticleIndex,

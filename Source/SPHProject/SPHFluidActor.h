@@ -27,7 +27,7 @@
 
 #define GRID_SIZE       (64u)
 #define NUM_PARTICLES   (10000u)
-#define NUM_BOUNDARY_PARTICLES (10000u)
+#define NUM_BOUNDARY_PARTICLES (30000u)
 
 UCLASS(Blueprintable)
 class SPHPROJECT_API ASPHFluidActor : public AActor
@@ -144,6 +144,8 @@ protected: // data
 	float* m_dDensities;
 	float* m_dPressures;
 	float* m_dEntireForces;
+	float* m_dBoundaryPsi;        // Akinci boundary effective volumes (computed once)
+	bool   m_boundaryPsiReady;    // false until Psi has been computed on the first tick
 
 	float* m_dSortedPos;
 	float* m_dSortedVel;

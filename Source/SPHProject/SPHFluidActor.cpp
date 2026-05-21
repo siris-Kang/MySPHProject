@@ -43,6 +43,7 @@ ASPHFluidActor::ASPHFluidActor()
 	}
 
 	m_bInitialized = false;
+	m_boundaryPsiReady = false;
 	m_numParticles = NUM_PARTICLES + NUM_BOUNDARY_PARTICLES;
 	m_numFluidParticles = NUM_PARTICLES;
 	m_hPos = nullptr;
@@ -88,7 +89,11 @@ ASPHFluidActor::ASPHFluidActor()
 	addedBoundaryParticles = 0;
 	addedFluidPraticles = 0;
 
-	float cellSize = m_params.particleRadius * 2.0f;  // cell size == particle diameter
+	// Cell size MUST be >= smoothingLength: the 3x3x3 neighbour search only reaches
+	// ~1.5 cells, so cellSize 0.02 < smoothingLength 0.04 missed neighbours in
+	// [0.03, 0.04] -> fluid couldn't "see" the boundary until overlapping -> it
+	// passed straight through. Matching cellSize to smoothingLength finds all neighbours.
+	float cellSize = m_params.smoothingLength;
 	m_params.cellSize = make_float3(cellSize, cellSize, cellSize);
 }
 
@@ -99,6 +104,21 @@ void ASPHFluidActor::BeginPlay()
 	initialize(m_numParticles);
 	resetStart();
 	_addBoudaryCube2();
+
+	// Only simulate/render boundary particles actually placed by _addBoudaryCube2.
+	// Unused slots stay at the origin; excluding them avoids a density singularity
+	// (explosion) and stray spheres.
+	m_numParticles = m_numFluidParticles + addedBoundaryParticles;
+
+	BoundaryParticleInstancedMeshComponent->PreAllocateInstancesMemory(addedBoundaryParticles);
+	for (uint32 i = m_numFluidParticles; i < m_numParticles; ++i)
+	{
+		FVector Location(
+			m_hPos[i * 4] * widthScaling,
+			m_hPos[i * 4 + 2] * widthYScaling,
+			m_hPos[i * 4 + 1] * widthScaling + widthScaling);
+		BoundaryParticleInstancedMeshComponent->AddInstance(FTransform(FRotator::ZeroRotator, Location, FVector(radiusScaling)));
+	}
 
 	ParticleInstancedMeshComponent->MarkRenderStateDirty();
 	BoundaryParticleInstancedMeshComponent->MarkRenderStateDirty();
@@ -145,17 +165,46 @@ void ASPHFluidActor::Tick(float DeltaTime)
 		m_dGridParticleHash, m_dGridParticleIndex, dPos,
 		m_numParticles, m_numGridCells);
 
+	// Akinci boundary volumes depend only on (static) boundary positions, so
+	// compute them once using the first frame's neighbour grid.
+	if (!m_boundaryPsiReady)
+	{
+		computeBoundaryPsi(
+			m_dBoundaryPsi, m_dSortedPos,
+			m_dGridParticleIndex, m_dCellStart, m_dCellEnd,
+			m_numParticles, m_numFluidParticles);
+		m_boundaryPsiReady = true;
+	}
+
 	computeDensityAndPressure(
-		m_dDensities, m_dPressures, m_dSortedPos, m_dSortedVel,
+		m_dDensities, m_dPressures, m_dBoundaryPsi, m_dSortedPos, m_dSortedVel,
 		m_dGridParticleIndex, m_dCellStart, m_dCellEnd,
 		m_numParticles, m_numFluidParticles, m_numGridCells);
 
 	computeForceAndViscosity(
-		m_dVel, m_dEntireForces, dt, m_dDensities, m_dPressures,
+		m_dVel, m_dEntireForces, dt, m_dDensities, m_dPressures, m_dBoundaryPsi,
 		m_dSortedPos, m_dSortedVel, m_dGridParticleIndex, m_dCellStart, m_dCellEnd,
 		m_numParticles, m_numFluidParticles, m_numGridCells);
 
 	integrateSystem(dPos, m_dVel, dt, m_numParticles);
+
+	// --- DEBUG: log fluid density/pressure ~once per second (Output Log) ---
+	static float s_debugAccum = 0.f;
+	s_debugAccum += DeltaTime;
+	if (s_debugAccum >= 1.0f)
+	{
+		s_debugAccum = 0.f;
+		cudaMemcpy(m_hDensities, m_dDensities, sizeof(float) * m_numParticles, cudaMemcpyDeviceToHost);
+		cudaMemcpy(m_hPressures, m_dPressures, sizeof(float) * m_numParticles, cudaMemcpyDeviceToHost);
+		double sumRho = 0.0, sumP = 0.0; float maxRho = 0.f, maxP = 0.f;
+		for (uint32 i = 0; i < m_numFluidParticles; ++i)
+		{
+			sumRho += m_hDensities[i]; sumP += m_hPressures[i];
+			maxRho = FMath::Max(maxRho, m_hDensities[i]); maxP = FMath::Max(maxP, m_hPressures[i]);
+		}
+		UE_LOG(LogTemp, Warning, TEXT("[SPH] avgRho=%.0f maxRho=%.0f avgP=%.1f maxP=%.1f (RestDensity=%.0f)"),
+			sumRho / m_numFluidParticles, maxRho, sumP / m_numFluidParticles, maxP, RestDensity);
+	}
 
 	cudaMemcpy(m_hPos, dPos, sizeof(float) * 4u * m_numParticles, cudaMemcpyDeviceToHost);
 
@@ -216,6 +265,7 @@ void ASPHFluidActor::initialize(int numParticles)
 
 	allocateArray((void**)&m_dDensities, sizeof(float) * numParticles);
 	allocateArray((void**)&m_dPressures, sizeof(float) * numParticles);
+	allocateArray((void**)&m_dBoundaryPsi, sizeof(float) * numParticles);
 	allocateArray((void**)&m_dEntireForces, memSize);
 
 	allocateArray((void**)&m_dSortedPos, memSize);
@@ -233,16 +283,13 @@ void ASPHFluidActor::initialize(int numParticles)
 
 	setParameters(&m_params);
 
+	// Fluid instances are fixed in count. Boundary instances are created later in
+	// BeginPlay, once _addBoudaryCube2 has placed the structure (so we only make
+	// instances for boundary particles actually used).
 	ParticleInstancedMeshComponent->PreAllocateInstancesMemory(m_numFluidParticles);
 	for (uint32 Index = 0; Index < m_numFluidParticles; ++Index)
 	{
 		ParticleInstancedMeshComponent->AddInstance(FTransform(FRotator::ZeroRotator, FVector(0.f), FVector(radiusScaling)));
-	}
-
-	BoundaryParticleInstancedMeshComponent->PreAllocateInstancesMemory(numParticles - m_numFluidParticles);
-	for (uint32 Index = 0; Index < numParticles - m_numFluidParticles; ++Index)
-	{
-		BoundaryParticleInstancedMeshComponent->AddInstance(FTransform(FRotator::ZeroRotator, FVector(0.f), FVector(radiusScaling)));
 	}
 
 	m_bInitialized = true;
@@ -263,6 +310,7 @@ void ASPHFluidActor::finalize()
 	freeArray(m_dVel);
 	freeArray(m_dDensities);
 	freeArray(m_dPressures);
+	freeArray(m_dBoundaryPsi);
 	freeArray(m_dEntireForces);
 	freeArray(m_dSortedPos);
 	freeArray(m_dSortedVel);
@@ -417,8 +465,6 @@ void ASPHFluidActor::addBoundaryCube(int start, float* pos, float* width, float*
 					m_hVel[index * 4 + 2] = vel[2];
 					m_hVel[index * 4 + 3] = vel[3];
 					index++;
-					FTransform PositionVector(FVector(m_hPos[index * 4] * widthScaling, m_hPos[index * 4 + 2] * widthYScaling, m_hPos[index * 4 + 1] * widthScaling + widthScaling));
-					BoundaryParticleInstancedMeshComponent->UpdateInstanceTransform(index - m_numFluidParticles, PositionVector, true);
 					i++;
 				}
 			}
@@ -460,8 +506,6 @@ void ASPHFluidActor::addBoundaryRotateCube(int start, float* pos, float* width, 
 					m_hVel[index * 4 + 2] = vel[2];
 					m_hVel[index * 4 + 3] = vel[3];
 					index++;
-					FTransform PositionVector(FVector(m_hPos[index * 4] * widthScaling, m_hPos[index * 4 + 2] * widthYScaling, m_hPos[index * 4 + 1] * widthScaling + widthScaling));
-					BoundaryParticleInstancedMeshComponent->UpdateInstanceTransform(index - m_numFluidParticles, PositionVector, true);
 					i++;
 				}
 			}
@@ -503,33 +547,16 @@ void ASPHFluidActor::_addBoudaryCube()
 
 void ASPHFluidActor::_addBoudaryCube2()
 {
-	float pos1[4], width1[4], vel1[4];
-	float space = 1.3f;
-	vel1[0] = vel1[1] = vel1[2] = vel1[3] = 0.0f;
+	float pos[4], width[4], vel[4];
+	const float d = m_params.particleRadius * 1.3f;   // boundary particle spacing (~0.013)
+	vel[0] = vel[1] = vel[2] = vel[3] = 0.0f;
 
-	pos1[0] = -0.2f; pos1[1] = 0.28f; pos1[2] = -1.1f; pos1[3] = 0.0f;
-	width1[0] = 0.5f; width1[1] = 0.01f; width1[2] = 2.0f; width1[3] = 0.0f;
-	addBoundaryRotateCube(m_numFluidParticles, pos1, width1, vel1, 0.3f, m_params.particleRadius * space, &addedBoundaryParticles);
-
-	pos1[0] = -0.7f; pos1[1] = 0.1f; pos1[2] = -1.1f;
-	width1[0] = 1.0f; width1[1] = 0.03f; width1[2] = 2.0f;
-	addBoundaryRotateCube(m_numFluidParticles, pos1, width1, vel1, -0.4f, m_params.particleRadius * space, &addedBoundaryParticles);
-
-	pos1[0] = -0.8f; pos1[1] = -0.9f; pos1[2] = -1.1f;
-	width1[0] = 1.8f; width1[1] = 0.01f; width1[2] = 2.0f;
-	addBoundaryRotateCube(m_numFluidParticles, pos1, width1, vel1, 0.2f, m_params.particleRadius * space, &addedBoundaryParticles);
-
-	pos1[0] = 0.3f; pos1[1] = 0.5f; pos1[2] = -1.1f;
-	width1[0] = 0.01f; width1[1] = 0.3f; width1[2] = 2.0f;
-	addBoundaryCube(m_numFluidParticles, pos1, width1, vel1, m_params.particleRadius * space, &addedBoundaryParticles);
-
-	pos1[0] = -0.7f; pos1[1] = 0.1f; pos1[2] = -1.1f;
-	width1[0] = 0.01f; width1[1] = 0.4f; width1[2] = 2.0f;
-	addBoundaryCube(m_numFluidParticles, pos1, width1, vel1, m_params.particleRadius * space, &addedBoundaryParticles);
-
-	pos1[0] = 1.0f; pos1[1] = -0.5f; pos1[2] = -1.1f;
-	width1[0] = 0.01f; width1[1] = 0.4f; width1[2] = 2.0f;
-	addBoundaryCube(m_numFluidParticles, pos1, width1, vel1, m_params.particleRadius * space, &addedBoundaryParticles);
+	// Thick angled slide under the falling fluid. Tilted so it rises toward +x
+	// => fluid slides down toward -x. (The geometric collision plane in the kernel
+	// is aligned to this slab's top surface.)
+	pos[0] = -0.7f; pos[1] = -0.3f; pos[2] = -0.1f; pos[3] = 0.0f;
+	width[0] = 1.2f; width[1] = 0.05f; width[2] = 0.6f; width[3] = 0.0f;
+	addBoundaryRotateCube(m_numFluidParticles, pos, width, vel, 0.4f, d, &addedBoundaryParticles);
 }
 
 void ASPHFluidActor::_addFluidCube()

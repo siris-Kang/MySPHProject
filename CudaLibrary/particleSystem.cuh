@@ -52,8 +52,17 @@ extern "C"
                                      uint   numParticles,
                                      uint   numCells);
 
+    void computeBoundaryPsi(float* boundaryPsi,
+                            float* sortedPos,
+                            uint*  gridParticleIndex,
+                            uint*  cellStart,
+                            uint*  cellEnd,
+                            uint   numParticles,
+                            uint   numFluidParticles);
+
     void computeDensityAndPressure(float* densities,
                                    float* pressures,
+                                   float* boundaryPsi,
                                    float* sortedPos,
                                    float* sortedVel,
                                    uint*  gridParticleIndex,
@@ -68,6 +77,7 @@ extern "C"
                                   float  deltaTime,
                                   float* updatedDensities,
                                   float* updatedPressures,
+                                  float* boundaryPsi,
                                   float* sortedPos,
                                   float* sortedVel,
                                   uint*  gridParticleIndex,
