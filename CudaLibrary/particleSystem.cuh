@@ -46,9 +46,11 @@ extern "C"
     cudaError_t reorderDataAndFindCellStart(uint  *cellStart,
                                      uint  *cellEnd,
                                      float *sortedPos,
+                                     float *sortedVel,
                                      uint  *gridParticleHash,
                                      uint  *gridParticleIndex,
                                      float *oldPos,
+                                     float *oldVel,
                                      uint   numParticles,
                                      uint   numCells);
 

@@ -3,6 +3,9 @@
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "UObject/ConstructorHelpers.h"
+#include "SPHColliderComponent.h"
+#include "EngineUtils.h"   // TActorIterator
+#include "DrawDebugHelpers.h"
 
 #include <random>
 
@@ -95,6 +98,8 @@ ASPHFluidActor::ASPHFluidActor()
 	// passed straight through. Matching cellSize to smoothingLength finds all neighbours.
 	float cellSize = m_params.smoothingLength;
 	m_params.cellSize = make_float3(cellSize, cellSize, cellSize);
+
+	m_params.numColliders = 0;
 }
 
 void ASPHFluidActor::BeginPlay()
@@ -103,25 +108,66 @@ void ASPHFluidActor::BeginPlay()
 
 	initialize(m_numParticles);
 	resetStart();
-	_addBoudaryCube2();
 
-	// Only simulate/render boundary particles actually placed by _addBoudaryCube2.
-	// Unused slots stay at the origin; excluding them avoids a density singularity
-	// (explosion) and stray spheres.
-	m_numParticles = m_numFluidParticles + addedBoundaryParticles;
-
-	BoundaryParticleInstancedMeshComponent->PreAllocateInstancesMemory(addedBoundaryParticles);
-	for (uint32 i = m_numFluidParticles; i < m_numParticles; ++i)
-	{
-		FVector Location(
-			m_hPos[i * 4] * widthScaling,
-			m_hPos[i * 4 + 2] * widthYScaling,
-			m_hPos[i * 4 + 1] * widthScaling + widthScaling);
-		BoundaryParticleInstancedMeshComponent->AddInstance(FTransform(FRotator::ZeroRotator, Location, FVector(radiusScaling)));
-	}
+	// Structure is now defined by editor-placed cube colliders (no boundary particles).
+	m_numParticles = m_numFluidParticles;
+	GatherColliders();
 
 	ParticleInstancedMeshComponent->MarkRenderStateDirty();
-	BoundaryParticleInstancedMeshComponent->MarkRenderStateDirty();
+}
+
+void ASPHFluidActor::GatherColliders()
+{
+	m_colliders.Reset();
+	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+	{
+		if (USPHColliderComponent* Col = It->FindComponentByClass<USPHColliderComponent>())
+		{
+			m_colliders.Add(Col);
+			FVector Wc, WHalf; FQuat Wr;
+			if (Col->GetWorldBox(Wc, Wr, WHalf))
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[SPH] Collider %s center=%s halfExtent=%s"),
+					*It->GetName(), *Wc.ToString(), *WHalf.ToString());
+			}
+			if (m_colliders.Num() >= MAX_SPH_COLLIDERS) break;
+		}
+	}
+}
+
+void ASPHFluidActor::UpdateColliderParams()
+{
+	const float S = widthScaling;                 // uniform sim->world scale
+	const FVector ActorLoc = GetActorLocation();
+	int32 n = 0;
+
+	for (USPHColliderComponent* Col : m_colliders)
+	{
+		if (!Col || n >= MAX_SPH_COLLIDERS) break;
+
+		FVector Wc, WHalf; FQuat Wr;
+		if (!Col->GetWorldBox(Wc, Wr, WHalf)) continue;
+
+		// world -> sim: relative to the actor, scaled by 1/S, with UE Z(up)<->sim Y
+		// and UE Y(depth)<->sim Z swapped.
+		const FVector Sc((Wc.X - ActorLoc.X) / S, (Wc.Z - ActorLoc.Z) / S, (Wc.Y - ActorLoc.Y) / S);
+		const FVector Ax = Wr.RotateVector(FVector::ForwardVector);  // local X
+		const FVector Ay = Wr.RotateVector(FVector::RightVector);    // local Y
+		const FVector Az = Wr.RotateVector(FVector::UpVector);       // local Z
+
+		m_params.colliderCenter[n]     = make_float3(Sc.X, Sc.Y, Sc.Z);
+		m_params.colliderAxisX[n]      = make_float3(Ax.X, Ax.Z, Ax.Y);   // dir swap Y<->Z
+		m_params.colliderAxisY[n]      = make_float3(Ay.X, Ay.Z, Ay.Y);
+		m_params.colliderAxisZ[n]      = make_float3(Az.X, Az.Z, Az.Y);
+		m_params.colliderHalfExtent[n] = make_float3(WHalf.X / S, WHalf.Y / S, WHalf.Z / S);
+
+		if (bDrawColliderBounds)
+		{
+			DrawDebugBox(GetWorld(), Wc, WHalf, Wr, FColor::Cyan, false, 0.0f, 0, 2.0f);
+		}
+		++n;
+	}
+	m_params.numColliders = n;
 }
 
 void ASPHFluidActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -152,6 +198,9 @@ void ASPHFluidActor::Tick(float DeltaTime)
 	m_params.gasStiffnessConstant = GasStiffness;
 	m_params.viscosityCoefficient = Viscosity;
 
+	// Refresh the cube colliders each frame (so they can be moved/animated).
+	UpdateColliderParams();
+
 	float* dPos = (float*)m_cudaPosVBO;
 
 	setParameters(&m_params);
@@ -161,8 +210,8 @@ void ASPHFluidActor::Tick(float DeltaTime)
 	sortParticles(m_dGridParticleHash, m_dGridParticleIndex, m_numParticles);
 
 	reorderDataAndFindCellStart(
-		m_dCellStart, m_dCellEnd, m_dSortedPos,
-		m_dGridParticleHash, m_dGridParticleIndex, dPos,
+		m_dCellStart, m_dCellEnd, m_dSortedPos, m_dSortedVel,
+		m_dGridParticleHash, m_dGridParticleIndex, dPos, m_dVel,
 		m_numParticles, m_numGridCells);
 
 	// Akinci boundary volumes depend only on (static) boundary positions, so
@@ -208,31 +257,21 @@ void ASPHFluidActor::Tick(float DeltaTime)
 
 	cudaMemcpy(m_hPos, dPos, sizeof(float) * 4u * m_numParticles, cudaMemcpyDeviceToHost);
 
-	// Batch the transform updates: one call per component, no per-frame
-	// MarkRenderStateDirty (which would recreate the whole render proxy).
-	const uint32 numBoundary = m_numParticles - m_numFluidParticles;
-
+	// Batch the fluid transform updates (one call, no per-frame MarkRenderStateDirty).
+	// Sim -> world is anchored at the actor: uniform scale S, with sim Y (up) -> UE Z
+	// and sim Z (depth) -> UE Y. So the fluid is centered on the actor's location.
+	const FVector ActorLoc = GetActorLocation();
+	const float S = widthScaling;
 	m_fluidTransforms.SetNumUninitialized(m_numFluidParticles);
 	for (uint32 i = 0; i < m_numFluidParticles; ++i)
 	{
 		FVector Location(
-			m_hPos[i * 4] * widthScaling,
-			m_hPos[i * 4 + 2] * widthYScaling,
-			m_hPos[i * 4 + 1] * widthScaling + widthScaling);
+			ActorLoc.X + m_hPos[i * 4]     * S,    // sim x  -> UE X
+			ActorLoc.Y + m_hPos[i * 4 + 2] * S,    // sim z  -> UE Y (depth)
+			ActorLoc.Z + m_hPos[i * 4 + 1] * S);   // sim y  -> UE Z (up)
 		m_fluidTransforms[i] = FTransform(FRotator::ZeroRotator, Location, FVector(radiusScaling));
 	}
 	ParticleInstancedMeshComponent->BatchUpdateInstancesTransforms(0, m_fluidTransforms, /*bWorldSpace*/true, /*bMarkRenderStateDirty*/true, /*bTeleport*/true);
-
-	m_boundaryTransforms.SetNumUninitialized(numBoundary);
-	for (uint32 i = m_numFluidParticles; i < m_numParticles; ++i)
-	{
-		FVector Location(
-			m_hPos[i * 4] * widthScaling,
-			m_hPos[i * 4 + 2] * widthYScaling,
-			m_hPos[i * 4 + 1] * widthScaling + widthScaling);
-		m_boundaryTransforms[i - m_numFluidParticles] = FTransform(FRotator::ZeroRotator, Location, FVector(radiusScaling));
-	}
-	BoundaryParticleInstancedMeshComponent->BatchUpdateInstancesTransforms(0, m_boundaryTransforms, /*bWorldSpace*/true, /*bMarkRenderStateDirty*/true, /*bTeleport*/true);
 }
 
 void ASPHFluidActor::initialize(int numParticles)
@@ -398,6 +437,12 @@ void ASPHFluidActor::initStartGrid(uint* size, float spacing, float jitter, uint
 {
 	srand(1973);
 
+	// Center the initial fluid block on the sim origin -> it spawns at the actor's
+	// location. Rendering is handled by Tick (actor-relative), so no instance update here.
+	const float halfX = size[0] * spacing * 0.5f;
+	const float halfY = size[1] * spacing * 0.5f;
+	const float halfZ = size[2] * spacing * 0.5f;
+
 	for (uint z = 0; z < size[2]; z++)
 	{
 		for (uint y = 0; y < size[1]; y++)
@@ -408,15 +453,12 @@ void ASPHFluidActor::initStartGrid(uint* size, float spacing, float jitter, uint
 
 				if (i < numParticles)
 				{
-					m_hPos[i * 4]     = (spacing * x) + m_params.particleRadius - 0.2f;
-					m_hPos[i * 4 + 1] = (spacing * y) + m_params.particleRadius + 0.5f;
-					m_hPos[i * 4 + 2] = (spacing * z) + m_params.particleRadius;
+					m_hPos[i * 4]     = (spacing * x) - halfX;
+					m_hPos[i * 4 + 1] = (spacing * y) - halfY;
+					m_hPos[i * 4 + 2] = (spacing * z) - halfZ;
 					m_hPos[i * 4 + 3] = 1.0f;
 
 					m_hVel[i * 4] = m_hVel[i * 4 + 1] = m_hVel[i * 4 + 2] = m_hVel[i * 4 + 3] = 0.0f;
-
-					FTransform PositionVector(FVector(m_hPos[i * 4] * widthScaling, m_hPos[i * 4 + 2] * widthYScaling, m_hPos[i * 4 + 1] * widthScaling + widthScaling));
-					ParticleInstancedMeshComponent->UpdateInstanceTransform(i, PositionVector, true);
 				}
 			}
 		}

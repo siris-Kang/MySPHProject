@@ -29,6 +29,8 @@
 #define NUM_PARTICLES   (10000u)
 #define NUM_BOUNDARY_PARTICLES (30000u)
 
+class USPHColliderComponent;
+
 UCLASS(Blueprintable)
 class SPHPROJECT_API ASPHFluidActor : public AActor
 {
@@ -125,6 +127,8 @@ protected: // data
 		float GasStiffness = 3.0f;
 	UPROPERTY(EditAnywhere, Category = "SPH|Physics", meta = (ClampMin = "0.0"))
 		float Viscosity = 3.5f;
+	UPROPERTY(EditAnywhere, Category = "SPH|Debug")
+		bool bDrawColliderBounds = true;
 
 	// CPU data
 	float* m_hPos;
@@ -178,4 +182,12 @@ protected: // data
 	// reusable buffers for batched instance-transform updates (avoid per-frame realloc)
 	TArray<FTransform> m_fluidTransforms;
 	TArray<FTransform> m_boundaryTransforms;
+
+	// Editor-placed cube colliders (actors carrying a USPHColliderComponent), gathered
+	// at BeginPlay and read every frame so the fluid avoids them (and they can move).
+	UPROPERTY()
+	TArray<USPHColliderComponent*> m_colliders;
+
+	void GatherColliders();
+	void UpdateColliderParams();   // world boxes -> sim-space OBBs in m_params
 };

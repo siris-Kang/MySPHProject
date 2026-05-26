@@ -90,70 +90,50 @@ struct integrate_functor
         pos += vel * deltaTime;
         //printf("pos=(%f, %f, %f)\n\n", pos.x, pos.y, pos.z);
 
-        // set this to zero to disable collisions with cube sides
-#if 1
-
-        if (pos.x > 1.0f - params.particleRadius)
+        // Box (OBB) collision against editor-placed cube colliders. Each cube is an
+        // oriented box in sim space; push the particle out through the nearest face
+        // (least-penetration axis) and cancel the into-face velocity. This replaces
+        // the hardcoded slide and lets the structure be designed by placing cubes.
+        for (int c = 0; c < params.numColliders; ++c)
         {
-            pos.x = 1.0f - params.particleRadius;
-            vel.x *= params.boundaryDamping;
-        }
+            float3 d = pos - params.colliderCenter[c];
+            // particle position in the box's local frame
+            float lx = dot(d, params.colliderAxisX[c]);
+            float ly = dot(d, params.colliderAxisY[c]);
+            float lz = dot(d, params.colliderAxisZ[c]);
+            // inflate the box by the particle radius
+            float ex = params.colliderHalfExtent[c].x + params.particleRadius;
+            float ey = params.colliderHalfExtent[c].y + params.particleRadius;
+            float ez = params.colliderHalfExtent[c].z + params.particleRadius;
 
-        if (pos.x < -1.0f + params.particleRadius)
-        {
-            pos.x = -1.0f + params.particleRadius;
-            vel.x *= params.boundaryDamping;
-        }
-
-        if (pos.y > 1.0f - params.particleRadius)
-        {
-            pos.y = 1.0f - params.particleRadius;
-            vel.y *= params.boundaryDamping;
-        }
-
-        if (pos.z > 1.0f - params.particleRadius)
-        {
-            pos.z = 1.0f - params.particleRadius;
-            vel.z *= params.boundaryDamping;
-        }
-
-        if (pos.z < -1.0f + params.particleRadius)
-        {
-            pos.z = -1.0f + params.particleRadius;
-            vel.z *= params.boundaryDamping;
-        }
-
-#endif
-
-        if (pos.y < -1.0f + params.particleRadius)
-        {
-            pos.y = -1.0f + params.particleRadius;
-            vel.y *= params.boundaryDamping;
-        }
-
-        // Geometric tilted-floor (slide) collision — fluid only (posData.w==1; the
-        // boundary particles, w==0, are visual and must keep their slab shape).
-        // Hard no-penetration constraint: project onto the surface, cancel the into-
-        // surface velocity. The plane matches the visual boundary slide in _addBoudaryCube2
-        // (pos -0.7,-0.3,-0.1, tilt 0.4): point on top face, normal (-sin a, cos a, 0).
-        // Finite slide footprint: x in [-0.7, 0.5], z in [-0.1, 0.5] (matches the
-        // boundary slab). Outside it, no collision -> fluid falls off the edge.
-        if (posData.w > 0.5f &&
-            pos.x >= -0.7f && pos.x <= 0.5f &&
-            pos.z >= -0.1f && pos.z <= 0.5f)
-        {
-            const float3 rampPoint  = make_float3(-0.7f, -0.25f, 0.0f);
-            const float3 rampNormal = make_float3(-0.38942f, 0.92106f, 0.0f);
-            float distToRamp = dot(pos - rampPoint, rampNormal);
-            // Only resolve shallow penetration (just below the surface). Particles
-            // deeper than smoothingLength below the plane have already fallen past /
-            // under the slide -> leave them, else they'd teleport back up onto it.
-            if (distToRamp < params.particleRadius && distToRamp > -params.smoothingLength)
+            if (fabsf(lx) < ex && fabsf(ly) < ey && fabsf(lz) < ez)   // inside -> penetrating
             {
-                pos += (params.particleRadius - distToRamp) * rampNormal;
-                float vn = dot(vel, rampNormal);
-                if (vn < 0.0f) vel -= vn * rampNormal;   // slide, no bounce
-                vel *= 0.99f;                            // mild friction
+                float px = ex - fabsf(lx);   // penetration depth per axis
+                float py = ey - fabsf(ly);
+                float pz = ez - fabsf(lz);
+
+                if (px <= py && px <= pz)        // push out along local X
+                {
+                    float3 n = (lx >= 0.0f ? params.colliderAxisX[c] : -params.colliderAxisX[c]);
+                    pos += px * n;
+                    float vn = dot(vel, n);
+                    if (vn < 0.0f) vel -= vn * n;
+                }
+                else if (py <= pz)               // push out along local Y
+                {
+                    float3 n = (ly >= 0.0f ? params.colliderAxisY[c] : -params.colliderAxisY[c]);
+                    pos += py * n;
+                    float vn = dot(vel, n);
+                    if (vn < 0.0f) vel -= vn * n;
+                }
+                else                              // push out along local Z
+                {
+                    float3 n = (lz >= 0.0f ? params.colliderAxisZ[c] : -params.colliderAxisZ[c]);
+                    pos += pz * n;
+                    float vn = dot(vel, n);
+                    if (vn < 0.0f) vel -= vn * n;
+                }
+                vel *= 0.99f;   // mild friction
             }
         }
 
@@ -210,9 +190,11 @@ __global__
 void reorderDataAndFindCellStartD(uint* cellStart,        // output: cell start index
     uint* cellEnd,          // output: cell end index
     float4* sortedPos,        // output: sorted positions
+    float4* sortedVel,        // output: sorted velocities
     uint* gridParticleHash, // input: sorted grid hashes
     uint* gridParticleIndex,// input: sorted particle indices
     float4* oldPos,           // input: sorted position array
+    float4* oldVel,           // input: velocity array
     uint    numParticles)
 {
     // Handle to thread block group
@@ -265,8 +247,10 @@ void reorderDataAndFindCellStartD(uint* cellStart,        // output: cell start 
         // Now use the sorted index to reorder the pos and vel data
         uint sortedIndex = gridParticleIndex[index];
         float4 pos = oldPos[sortedIndex];
+        float4 vel = oldVel[sortedIndex];
 
         sortedPos[index] = pos;
+        sortedVel[index] = vel;
     }
 }
 
@@ -746,9 +730,11 @@ extern "C"
     cudaError_t reorderDataAndFindCellStart(uint* cellStart,
         uint* cellEnd,
         float* sortedPos,
+        float* sortedVel,
         uint* gridParticleHash,
         uint* gridParticleIndex,
         float* oldPos,
+        float* oldVel,
         uint   numParticles,
         uint   numCells)
     {
@@ -764,9 +750,11 @@ extern "C"
             cellStart,
             cellEnd,
             (float4*)sortedPos,
+            (float4*)sortedVel,
             gridParticleHash,
             gridParticleIndex,
             (float4*)oldPos,
+            (float4*)oldVel,
             numParticles);
         getLastCudaError("Kernel execution failed: reorderDataAndFindCellStartD");
         return error;

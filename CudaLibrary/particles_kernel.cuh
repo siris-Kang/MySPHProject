@@ -15,6 +15,9 @@
 #include "vector_types.h"
 typedef unsigned int uint;
 
+// Max number of editor-placed box colliders the fluid avoids (OBB collision).
+#define MAX_SPH_COLLIDERS 16
+
 // simulation parameters
 struct SimParams
 {
@@ -69,6 +72,16 @@ struct SimParams
     float ZScaleFactor;
 
     int MarchingCubesNeighborSearchDepth;
+
+    // ---- Editor-placed box colliders (oriented boxes, in SIM space) ----
+    // The fluid does OBB collision against these so it avoids cubes placed in
+    // the level. All in sim space (the actor converts from UE world each frame).
+    int    numColliders;
+    float3 colliderCenter[MAX_SPH_COLLIDERS];
+    float3 colliderAxisX[MAX_SPH_COLLIDERS];      // unit local axes (orientation)
+    float3 colliderAxisY[MAX_SPH_COLLIDERS];
+    float3 colliderAxisZ[MAX_SPH_COLLIDERS];
+    float3 colliderHalfExtent[MAX_SPH_COLLIDERS]; // half-size along each local axis
 };
 
 #endif
