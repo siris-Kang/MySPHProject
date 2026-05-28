@@ -5,7 +5,6 @@
 #include "UObject/ConstructorHelpers.h"
 #include "SPHColliderComponent.h"
 #include "EngineUtils.h"   // TActorIterator
-#include "DrawDebugHelpers.h"
 
 #include <random>
 
@@ -187,10 +186,6 @@ void ASPHFluidActor::UpdateColliderParams()
 		m_params.colliderAxisZ[n]      = make_float3(Az.X, Az.Z, Az.Y);
 		m_params.colliderHalfExtent[n] = make_float3(WHalf.X / S, WHalf.Y / S, WHalf.Z / S);
 
-		if (bDrawColliderBounds)
-		{
-			DrawDebugBox(GetWorld(), Wc, WHalf, Wr, FColor::Cyan, false, 0.0f, 0, 2.0f);
-		}
 		++n;
 	}
 	m_params.numColliders = n;

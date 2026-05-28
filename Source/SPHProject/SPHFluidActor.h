@@ -26,8 +26,8 @@
 #endif
 
 #define GRID_SIZE       (64u)
-#define NUM_PARTICLES   (10000u)
-#define NUM_BOUNDARY_PARTICLES (30000u)
+#define NUM_PARTICLES   (50000u)
+#define NUM_BOUNDARY_PARTICLES (50000u)
 
 class USPHColliderComponent;
 
@@ -129,8 +129,6 @@ protected: // data
 		float GasStiffness = 3.0f;
 	UPROPERTY(EditAnywhere, Category = "SPH|Physics", meta = (ClampMin = "0.0"))
 		float Viscosity = 3.5f;
-	UPROPERTY(EditAnywhere, Category = "SPH|Debug")
-		bool bDrawColliderBounds = true;
 
 	// CPU data
 	float* m_hPos;
