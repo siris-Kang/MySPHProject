@@ -41,6 +41,7 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 public:
@@ -89,6 +90,7 @@ public:
 	void addBoundaryRotateCube(int start, float* pos, float* width, float* vel, float rotate, float particleDiameter, uint* addedBParticles);
 
 protected: // methods
+	void ApplyParticleMaterial();
 	void initialize(int numParticles);
 	void finalize();
 

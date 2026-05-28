@@ -106,6 +106,8 @@ void ASPHFluidActor::BeginPlay()
 {
 	Super::BeginPlay();
 
+	ApplyParticleMaterial();
+
 	initialize(m_numParticles);
 	resetStart();
 
@@ -114,6 +116,30 @@ void ASPHFluidActor::BeginPlay()
 	GatherColliders();
 
 	ParticleInstancedMeshComponent->MarkRenderStateDirty();
+}
+
+void ASPHFluidActor::OnConstruction(const FTransform& Transform)
+{
+	Super::OnConstruction(Transform);
+
+	ApplyParticleMaterial();
+}
+
+void ASPHFluidActor::ApplyParticleMaterial()
+{
+	if (!Material)
+	{
+		return;
+	}
+
+	if (ParticleInstancedMeshComponent)
+	{
+		ParticleInstancedMeshComponent->SetMaterial(0, Material);
+	}
+	if (BoundaryParticleInstancedMeshComponent)
+	{
+		BoundaryParticleInstancedMeshComponent->SetMaterial(0, Material);
+	}
 }
 
 void ASPHFluidActor::GatherColliders()
